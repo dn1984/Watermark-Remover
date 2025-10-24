@@ -15,7 +15,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!response.ok) throw new Error(data.msg || "Failed to fetch task status");
 
     res.status(200).json(data);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to fetch task status";
+    res.status(500).json({ error: message });
   }
 }

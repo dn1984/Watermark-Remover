@@ -1,19 +1,20 @@
 "use client";
+/* eslint-disable react/no-unescaped-entities */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, type ChangeEvent, type FormEvent } from "react";
 import Head from "next/head";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 export default function HomePage() {
-  const [videoUrl, setVideoUrl] = useState("");
-  const [taskId, setTaskId] = useState<string | null>(null);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [resultFileName, setResultFileName] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [videoReady, setVideoReady] = useState(false);
   const [progress, setProgress] = useState(0);
   const [downloads, setDownloads] = useState(0);
-  const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Enhanced Schema.org structured data
   const structuredData = {
@@ -93,8 +94,8 @@ export default function HomePage() {
     "step": [
       {
         "@type": "HowToStep",
-        "name": "Paste Video URL",
-        "text": "Copy your Sora 2 video URL and paste it into the input field",
+        "name": "Upload Sora 2 Video",
+        "text": "Click the upload field and choose your Sora 2 video file from your device",
         "position": 1
       },
       {
@@ -122,18 +123,35 @@ export default function HomePage() {
     }
   }, []);
 
-  const createTask = async () => {
-    if (!videoUrl.trim()) {
-      setError("Please enter a Sora 2 video URL");
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    setVideoFile(file);
+    setError(null);
+    setResultUrl(null);
+    setResultFileName(null);
+    setVideoReady(false);
+    setProgress(0);
+  };
+
+  const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!videoFile) {
+      setError("Please choose a video file to upload");
       return;
     }
 
-    if (!videoUrl.startsWith('http')) {
-      setError("Please enter a valid URL starting with http:// or https://");
+    if (!videoFile.type.startsWith("video/")) {
+      setError("Selected file must be a video");
       return;
     }
 
-    // Track conversion event
+    const maxSizeMb = 500;
+    if (videoFile.size > maxSizeMb * 1024 * 1024) {
+      setError(`Video must be smaller than ${maxSizeMb}MB`);
+      return;
+    }
+
     if (typeof window !== 'undefined') {
       console.log('Conversion: Sora 2 watermark removal started');
     }
@@ -141,90 +159,71 @@ export default function HomePage() {
     setProcessing(true);
     setError(null);
     setResultUrl(null);
+    setResultFileName(null);
     setVideoReady(false);
     setProgress(0);
 
+    const progressInterval = setInterval(() => {
+      setProgress(prev => {
+        if (prev >= 95) {
+          return 95;
+        }
+        return prev + 5;
+      });
+    }, 400);
+
     try {
+      const formData = new FormData();
+      formData.append("video", videoFile);
+
       const res = await fetch("/api/remove-watermark", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ videoUrl: videoUrl.trim() }),
+        body: formData,
       });
 
       const data = await res.json();
       if (!res.ok || data.error) {
-        throw new Error(data.error || "Failed to create task");
+        throw new Error(data.error || "Failed to process video");
       }
 
-      setTaskId(data.taskId);
-      pollTask(data.taskId);
-    } catch (err: any) {
-      setError(err.message);
+      setResultUrl(data.downloadUrl);
+      setResultFileName(data.fileName || "sora2_watermark_free_video.mp4");
+      setVideoReady(true);
+      setProgress(100);
+      setDownloads(prev => prev + 1);
+
+      if (typeof window !== 'undefined') {
+        console.log('Conversion: Sora 2 watermark removed successfully');
+      }
+
+      setVideoFile(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to process video";
+      setError(message);
+      setProgress(0);
+    } finally {
+      clearInterval(progressInterval);
       setProcessing(false);
     }
   };
 
-  const pollTask = async (taskId: string) => {
-    let progressInterval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 90) {
-          clearInterval(progressInterval);
-          return 90;
-        }
-        return prev + 10;
-      });
-    }, 1000);
-
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/remove-watermark?taskId=${taskId}`);
-        const data = await res.json();
-
-        if (data.data?.state === "success") {
-          clearInterval(interval);
-          clearInterval(progressInterval);
-          setProgress(100);
-          const resultJson = JSON.parse(data.data.resultJson);
-          setResultUrl(resultJson.resultUrls[0]);
-          setProcessing(false);
-          setVideoReady(true);
-          setDownloads(prev => prev + 1);
-
-          if (typeof window !== 'undefined') {
-            console.log('Conversion: Sora 2 watermark removed successfully');
-          }
-        } else if (data.data?.state === "fail") {
-          clearInterval(interval);
-          clearInterval(progressInterval);
-          setError(data.data.failMsg || "Task failed");
-          setProcessing(false);
-        }
-      } catch (err: any) {
-        clearInterval(interval);
-        clearInterval(progressInterval);
-        setError(err.message);
-        setProcessing(false);
-      }
-    }, 2000);
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !processing) {
-      createTask();
-    }
-  };
-
   const resetForm = () => {
-    setVideoUrl("");
-    setTaskId(null);
+    setVideoFile(null);
     setResultUrl(null);
+    setResultFileName(null);
     setProcessing(false);
     setError(null);
     setVideoReady(false);
     setProgress(0);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   };
+
+  const isUploadDisabled = processing || !videoFile;
 
   return (
     <>
@@ -328,7 +327,7 @@ export default function HomePage() {
                   "name": "How to remove watermark from Sora 2 video?",
                   "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "To remove watermark from Sora 2 video: 1) Paste your Sora 2 video URL into the input field. 2) Click 'Remove Watermark Now' button. 3) Wait 30-60 seconds for AI processing. 4) Download your watermark-free Sora 2 video in HD quality. Our tool automatically detects and removes Sora 2 watermarks without quality loss."
+                    "text": "To remove watermark from a Sora 2 video: 1) Upload your Sora 2 video file. 2) Click the 'Remove Watermark Now' button. 3) Wait for our AI to process the clip. 4) Download your watermark-free Sora 2 video in HD quality. Our tool automatically detects and removes Sora 2 watermarks without quality loss."
                   }
                 },
                 {
@@ -344,7 +343,7 @@ export default function HomePage() {
                   "name": "Does it work with all Sora 2 videos?",
                   "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "Yes, our Sora 2 watermark remover works with all Sora 2 AI generated videos regardless of resolution, duration, or content. Simply provide the video URL and our AI will automatically remove the Sora 2 watermark."
+                    "text": "Yes, our Sora 2 watermark remover works with all Sora 2 AI generated videos regardless of resolution, duration, or content. Simply upload the video file from your device and our AI will automatically remove the Sora 2 watermark."
                   }
                 },
                 {
@@ -485,40 +484,60 @@ export default function HomePage() {
               <h3 className="text-xl sm:text-2xl font-bold mb-6 text-center" itemProp="name">
                 🚀 Remove Sora 2 Watermark in 3 Easy Steps
               </h3>
-              <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-6">
-                <input
-                  type="url"
-                  placeholder="Paste your Sora 2 video URL here to remove watermark..."
-                  value={videoUrl}
-                  onChange={(e) => setVideoUrl(e.target.value)}
-                  onKeyPress={handleKeyPress}
-                  disabled={processing}
-                  className="flex-1 px-5 sm:px-6 py-4 rounded-xl border-2 border-gray-600 bg-gray-900 text-white placeholder-gray-400 focus:border-blue-500 focus:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500/30 transition-all duration-300 text-base disabled:opacity-50"
-                  aria-label="Enter Sora 2 video URL to remove watermark"
-                  itemProp="url"
-                />
+              <form onSubmit={handleUpload} className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-6">
+                <div className="flex-1">
+                  <label
+                    htmlFor="video-upload"
+                    className="block text-left text-sm font-semibold text-gray-200 mb-2"
+                  >
+                    Upload your Sora 2 video file
+                  </label>
+                  <input
+                    id="video-upload"
+                    ref={fileInputRef}
+                    type="file"
+                    accept="video/*"
+                    onChange={handleFileChange}
+                    disabled={processing}
+                    className="w-full px-5 sm:px-6 py-3 rounded-xl border-2 border-gray-600 bg-gray-900 text-white placeholder-gray-400 focus:border-blue-500 focus:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500/30 transition-all duration-300 text-base disabled:opacity-50"
+                    aria-label="Upload a Sora 2 video to remove its watermark"
+                  />
+                  <div className="mt-2 text-sm text-gray-300 min-h-[1.5rem]">
+                    {videoFile ? (
+                      <span className="truncate inline-block max-w-full" title={videoFile.name}>
+                        Selected file: {videoFile.name}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">
+                        Supported formats: MP4, MOV, WEBM (max 500MB)
+                      </span>
+                    )}
+                  </div>
+                </div>
                 <button
-                  onClick={createTask}
-                  disabled={processing}
+                  type="submit"
+                  disabled={isUploadDisabled}
                   className={`px-8 py-4 rounded-xl font-bold text-white transition-all duration-300 flex items-center justify-center gap-2 min-w-[200px] text-lg ${
-                    processing
+                    isUploadDisabled
                       ? 'bg-gradient-to-r from-gray-700 to-gray-600 cursor-not-allowed'
                       : 'bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 hover:from-blue-500 hover:via-purple-500 hover:to-pink-500 hover:shadow-2xl hover:shadow-blue-500/50 hover:scale-105 active:scale-95 animate-pulse-slow'
                   }`}
-                  aria-label="Remove watermark from Sora 2 video"
+                  aria-label="Remove watermark from uploaded Sora 2 video"
                 >
                   {processing ? (
                     <>
                       <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" aria-hidden="true" />
                       Removing...
                     </>
-                  ) : (
+                  ) : videoFile ? (
                     <>
                       ⚡ Remove Watermark Now
                     </>
+                  ) : (
+                    <>Select Video to Start</>
                   )}
                 </button>
-              </div>
+              </form>
 
               {processing && (
                 <div className="space-y-3" aria-label="Processing progress" role="status">
@@ -579,7 +598,7 @@ export default function HomePage() {
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
                 <a
                   href={resultUrl}
-                  download="sora2_watermark_free_video.mp4"
+                  download={resultFileName || "sora2_watermark_free_video.mp4"}
                   className="px-10 py-5 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-xl font-bold text-lg text-center hover:from-green-500 hover:to-emerald-500 hover:shadow-2xl hover:shadow-green-500/50 hover:scale-105 transition-all duration-300 flex items-center justify-center gap-3"
                   aria-label="Download watermark-free Sora 2 video"
                 >
@@ -624,9 +643,9 @@ export default function HomePage() {
               <div className="text-center p-6 bg-gray-900/50 rounded-xl border border-blue-700/30 hover:border-blue-500 transition-all duration-300 hover:scale-105" itemProp="step" itemScope itemType="https://schema.org/HowToStep">
                 <div className="text-5xl mb-4">📋</div>
                 <div className="text-6xl font-bold text-blue-400 mb-3">1</div>
-                <h3 className="text-xl font-bold mb-3" itemProp="name">Paste Video URL</h3>
+                <h3 className="text-xl font-bold mb-3" itemProp="name">Upload Your Video</h3>
                 <p className="text-gray-300" itemProp="text">
-                  Copy your Sora 2 video URL and paste it into the input field above
+                  Choose the Sora 2 video file with the watermark you want to remove
                 </p>
               </div>
               <div className="text-center p-6 bg-gray-900/50 rounded-xl border border-purple-700/30 hover:border-purple-500 transition-all duration-300 hover:scale-105" itemProp="step" itemScope itemType="https://schema.org/HowToStep">
@@ -634,7 +653,7 @@ export default function HomePage() {
                 <div className="text-6xl font-bold text-purple-400 mb-3">2</div>
                 <h3 className="text-xl font-bold mb-3" itemProp="name">Click Remove Watermark</h3>
                 <p className="text-gray-300" itemProp="text">
-                  Hit the button and let our AI remove the Sora 2 watermark in 30-60 seconds
+                  Hit the button and let our AI remove the Sora 2 watermark automatically
                 </p>
               </div>
               <div className="text-center p-6 bg-gray-900/50 rounded-xl border border-green-700/30 hover:border-green-500 transition-all duration-300 hover:scale-105" itemProp="step" itemScope itemType="https://schema.org/HowToStep">
@@ -690,7 +709,7 @@ export default function HomePage() {
                 <div className="text-5xl mb-4 group-hover:scale-110 transition-transform duration-300">✨</div>
                 <h3 className="text-xl font-bold mb-3 text-pink-300">No Signup Required</h3>
                 <p className="text-gray-300 leading-relaxed">
-                  Start removing Sora 2 watermarks immediately. No registration, no email, no account needed. Just paste and remove.
+                  Start removing Sora 2 watermarks immediately. No registration, no email, no account needed. Just upload and remove.
                 </p>
               </article>
 
@@ -767,8 +786,8 @@ export default function HomePage() {
                 </h3>
                 <div itemScope itemProp="acceptedAnswer" itemType="https://schema.org/Answer">
                   <p className="text-gray-300 leading-relaxed" itemProp="text">
-                    To remove watermark from Sora 2 video: <strong>(1)</strong> Paste your Sora 2 video URL into the input field above.
-                    <strong>(2)</strong> Click the "Remove Watermark Now" button. <strong>(3)</strong> Wait 30-60 seconds while our AI processes the video.
+                    To remove watermark from a Sora 2 video: <strong>(1)</strong> Upload the Sora 2 video file that contains the watermark.
+                    <strong>(2)</strong> Click the "Remove Watermark Now" button. <strong>(3)</strong> Watch the progress indicator while our AI processes the video.
                     <strong>(4)</strong> Download your watermark-free Sora 2 video in HD quality. Our tool automatically detects and removes
                     Sora 2 watermarks without any quality loss or compression.
                   </p>
@@ -797,7 +816,7 @@ export default function HomePage() {
                 <div itemScope itemProp="acceptedAnswer" itemType="https://schema.org/Answer">
                   <p className="text-gray-300 leading-relaxed" itemProp="text">
                     Yes, our Sora 2 watermark remover works with <strong>all Sora 2 AI generated videos</strong> regardless of resolution
-                    (720p, 1080p, 4K), duration (short or long videos), or content type. Simply provide the Sora 2 video URL and our
+                    (720p, 1080p, 4K), duration (short or long videos), or content type. Simply upload the Sora 2 video file and our
                     advanced AI will automatically detect and remove the watermark while preserving the original video quality.
                   </p>
                 </div>
@@ -881,7 +900,7 @@ export default function HomePage() {
                 <div itemScope itemProp="acceptedAnswer" itemType="https://schema.org/Answer">
                   <p className="text-gray-300 leading-relaxed" itemProp="text">
                     No installation required! Our Sora 2 watermark remover is a <strong>100% online web-based tool</strong>. Simply open
-                    your browser, paste the video URL, and remove the watermark instantly. No software download, no plugins, no extensions
+                    your browser, upload the video file, and remove the watermark instantly. No software download, no plugins, no extensions
                     needed. Works directly in Chrome, Firefox, Safari, Edge, and all modern browsers.
                   </p>
                 </div>
@@ -1031,7 +1050,7 @@ export default function HomePage() {
                   </p>
                   <ol className="list-decimal list-inside space-y-2 ml-4">
                     <li>Ensure you have a stable internet connection for faster upload and download speeds</li>
-                    <li>Use the original video URL directly from Sora 2 for highest quality input</li>
+                    <li>Use the original video file exported from Sora 2 for the highest quality input</li>
                     <li>Wait for the full processing to complete before downloading (usually 30-60 seconds)</li>
                     <li>Download your video immediately after processing for best availability</li>
                     <li>Check the preview before downloading to ensure the watermark removal is perfect</li>
@@ -1098,7 +1117,7 @@ export default function HomePage() {
                   <h3 className="text-xl font-bold mb-3 text-blue-300">Start Removing Sora 2 Watermarks Now!</h3>
                   <p className="mb-4">
                     Ready to <strong>remove Sora 2 watermark</strong> from your videos? Simply scroll back to the top of this page,
-                    paste your Sora 2 video URL, and click the "Remove Watermark Now" button. In just 30-60 seconds, you'll have a
+                    upload your Sora 2 video file, and click the "Remove Watermark Now" button. In just moments, you'll have a
                     pristine, watermark-free video ready for download in HD quality. Join the 2,847+ satisfied users who have already
                     used our <strong>Sora 2 watermark remover</strong> to create professional content!
                   </p>
@@ -1191,28 +1210,28 @@ export default function HomePage() {
               <div>
                 <h4 className="text-lg font-bold mb-4 text-gray-300">Quick Links</h4>
                 <ul className="space-y-2 text-sm">
-                  <li><a href="/" className="text-gray-400 hover:text-blue-400 transition-colors">Home</a></li>
-                  <li><a href="/how-it-works" className="text-gray-400 hover:text-blue-400 transition-colors">How It Works</a></li>
-                  <li><a href="/pricing" className="text-gray-400 hover:text-blue-400 transition-colors">Pricing (Free)</a></li>
-                  <li><a href="/blog" className="text-gray-400 hover:text-blue-400 transition-colors">Blog</a></li>
+                  <li><Link href="/" className="text-gray-400 hover:text-blue-400 transition-colors">Home</Link></li>
+                  <li><Link href="/how-it-works" className="text-gray-400 hover:text-blue-400 transition-colors">How It Works</Link></li>
+                  <li><Link href="/pricing" className="text-gray-400 hover:text-blue-400 transition-colors">Pricing (Free)</Link></li>
+                  <li><Link href="/blog" className="text-gray-400 hover:text-blue-400 transition-colors">Blog</Link></li>
                 </ul>
               </div>
               <div>
                 <h4 className="text-lg font-bold mb-4 text-gray-300">Resources</h4>
                 <ul className="space-y-2 text-sm">
-                  <li><a href="/faq" className="text-gray-400 hover:text-blue-400 transition-colors">FAQ</a></li>
-                  <li><a href="/tutorials" className="text-gray-400 hover:text-blue-400 transition-colors">Tutorials</a></li>
-                  <li><a href="/api" className="text-gray-400 hover:text-blue-400 transition-colors">API Access</a></li>
-                  <li><a href="/support" className="text-gray-400 hover:text-blue-400 transition-colors">Support</a></li>
+                  <li><Link href="/faq" className="text-gray-400 hover:text-blue-400 transition-colors">FAQ</Link></li>
+                  <li><Link href="/tutorials" className="text-gray-400 hover:text-blue-400 transition-colors">Tutorials</Link></li>
+                  <li><Link href="/api" className="text-gray-400 hover:text-blue-400 transition-colors">API Access</Link></li>
+                  <li><Link href="/support" className="text-gray-400 hover:text-blue-400 transition-colors">Support</Link></li>
                 </ul>
               </div>
               <div>
                 <h4 className="text-lg font-bold mb-4 text-gray-300">Legal</h4>
                 <ul className="space-y-2 text-sm">
-                  <li><a href="/privacy" className="text-gray-400 hover:text-blue-400 transition-colors">Privacy Policy</a></li>
-                  <li><a href="/terms" className="text-gray-400 hover:text-blue-400 transition-colors">Terms of Service</a></li>
-                  <li><a href="/dmca" className="text-gray-400 hover:text-blue-400 transition-colors">DMCA</a></li>
-                  <li><a href="/contact" className="text-gray-400 hover:text-blue-400 transition-colors">Contact Us</a></li>
+                  <li><Link href="/privacy" className="text-gray-400 hover:text-blue-400 transition-colors">Privacy Policy</Link></li>
+                  <li><Link href="/terms" className="text-gray-400 hover:text-blue-400 transition-colors">Terms of Service</Link></li>
+                  <li><Link href="/dmca" className="text-gray-400 hover:text-blue-400 transition-colors">DMCA</Link></li>
+                  <li><Link href="/contact" className="text-gray-400 hover:text-blue-400 transition-colors">Contact Us</Link></li>
                 </ul>
               </div>
             </div>

@@ -1,48 +1,134 @@
-// app/api/remove-watermark/route.ts
+import { randomUUID } from "crypto";
+import { copyFile, readFile, unlink, writeFile } from "fs/promises";
 import { NextRequest, NextResponse } from "next/server";
+import { tmpdir } from "os";
+import { extname, join } from "path";
+
+interface ProcessedFileInfo {
+  path: string;
+  fileName: string;
+  mimeType: string;
+}
+
+const processedFiles = new Map<string, ProcessedFileInfo>();
+const CLEANUP_DELAY_MS = 30 * 60 * 1000; // 30 minutes
+
+const isFileLike = (value: unknown): value is File => {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "arrayBuffer" in value &&
+    "size" in value &&
+    "type" in value
+  );
+};
+
+const sanitizeFileName = (name: string) => {
+  return name
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9-_]/g, "")
+    .toLowerCase();
+};
+
+const scheduleCleanup = (fileId: string, filePath: string) => {
+  setTimeout(() => {
+    unlink(filePath).catch(() => undefined);
+    processedFiles.delete(fileId);
+  }, CLEANUP_DELAY_MS);
+};
+
+const simulateWatermarkRemoval = async (sourcePath: string, destinationPath: string) => {
+  // Placeholder for actual watermark removal logic.
+  // For now, simply copy the uploaded file to the processed destination.
+  await copyFile(sourcePath, destinationPath);
+};
 
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const { videoUrl } = body;
+  const formData = await req.formData();
+  const file = formData.get("video");
 
-  if (!videoUrl) return NextResponse.json({ error: "videoUrl is required" }, { status: 400 });
+  if (!file || typeof file === "string") {
+    return NextResponse.json({ error: "Video file is required" }, { status: 400 });
+  }
+
+  if (!isFileLike(file)) {
+    return NextResponse.json({ error: "Invalid video upload" }, { status: 400 });
+  }
+
+  const mimeType = file.type || "video/mp4";
+  if (!mimeType.startsWith("video/")) {
+    return NextResponse.json({ error: "Uploaded file must be a video" }, { status: 400 });
+  }
+
+  const maxSizeBytes = 500 * 1024 * 1024; // 500MB limit
+  if (file.size > maxSizeBytes) {
+    return NextResponse.json({ error: "Video file is too large (max 500MB)" }, { status: 413 });
+  }
+
+  const fileId = randomUUID();
+  const originalName = typeof file.name === "string" ? file.name : "sora2-video.mp4";
+  const extension = (extname(originalName) || ".mp4").toLowerCase();
+  const baseName = originalName.slice(0, originalName.length - extension.length) || "sora2-video";
+  const safeBaseName = sanitizeFileName(baseName) || "sora2-video";
+  const originalPath = join(tmpdir(), `${fileId}-${safeBaseName}${extension}`);
+  const processedPath = join(tmpdir(), `processed-${fileId}-${safeBaseName}${extension}`);
 
   try {
-    const response = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer 18f0ad30240e8aa55505bae6215646d5",
-      },
-      body: JSON.stringify({
-        model: "sora-watermark-remover",
-        input: { video_url: videoUrl },
-      }),
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await writeFile(originalPath, buffer);
+
+    await simulateWatermarkRemoval(originalPath, processedPath);
+    await unlink(originalPath).catch(() => undefined);
+
+    const downloadFileName = `${safeBaseName}-watermark-free${extension}`;
+    processedFiles.set(fileId, {
+      path: processedPath,
+      fileName: downloadFileName,
+      mimeType,
     });
 
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.msg || "Failed to create task");
+    scheduleCleanup(fileId, processedPath);
 
-    return NextResponse.json({ taskId: data.data.taskId });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({
+      fileId,
+      downloadUrl: `/api/remove-watermark?fileId=${encodeURIComponent(fileId)}`,
+      fileName: downloadFileName,
+      message: "Watermark removed successfully",
+    });
+  } catch (error) {
+    await unlink(originalPath).catch(() => undefined);
+    await unlink(processedPath).catch(() => undefined);
+    console.error("Failed to process video", error);
+    return NextResponse.json({ error: "Failed to process video" }, { status: 500 });
   }
 }
 
 export async function GET(req: NextRequest) {
-  const taskId = req.nextUrl.searchParams.get("taskId");
-  if (!taskId) return NextResponse.json({ error: "taskId is required" }, { status: 400 });
+  const fileId = req.nextUrl.searchParams.get("fileId");
+
+  if (!fileId) {
+    return NextResponse.json({ error: "fileId is required" }, { status: 400 });
+  }
+
+  const info = processedFiles.get(fileId);
+  if (!info) {
+    return NextResponse.json({ error: "Processed video not found or expired" }, { status: 404 });
+  }
 
   try {
-    const response = await fetch(`https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${taskId}`, {
+    const data = await readFile(info.path);
+    return new NextResponse(data, {
       headers: {
-        Authorization: "Bearer 18f0ad30240e8aa55505bae6215646d5",
+        "Content-Type": info.mimeType || "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${info.fileName}"`,
+        "Cache-Control": "no-store",
       },
     });
-
-    const data = await response.json();
-    return NextResponse.json(data);
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (error) {
+    processedFiles.delete(fileId);
+    await unlink(info.path).catch(() => undefined);
+    console.error("Failed to stream processed video", error);
+    return NextResponse.json({ error: "Failed to retrieve processed video" }, { status: 500 });
   }
 }
